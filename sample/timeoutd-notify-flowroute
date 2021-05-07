@@ -1,0 +1,24 @@
+#!/bin/sh
+
+# This version of timeoutd-notify uses the flowroute API to send a text
+
+# From number has to be on the flowroute account
+FROM="18005551212"
+
+# To number is who to notify separated by spaces
+TOLIST="18005551213 18005551214"
+
+FLOWROUTE_USERNAME="myapikey"
+FLOWROUTE_PASSWORD="myapipass"
+
+TEXT="`uname -n`: Timeout for $1, Last Address $2"
+
+for TO in "$TOLIST"; do
+	POST="{\"data\":{\"type\":\"message\",\"attributes\":{\"to\":\"${TO}\",\"from\":\"${FROM}\",\"body\":\"${TEXT}\"}}}"
+
+	curl -s -X POST https://api.flowroute.com/v2.1/messages \
+		-H 'Content-Type: application/json' \
+		-u "${FLOWROUTE_USERNAME}:${FLOWROUTE_PASSWORD}" \
+		-d "$POST" >/dev/null
+done
+

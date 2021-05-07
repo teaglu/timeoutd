@@ -1,0 +1,14 @@
+[Unit]
+Description=Timeout Daemon
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/timeoutd -m
+User=daemon
+
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target
+

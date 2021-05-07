@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# I can't ever remember what order to run all this stuff in...
+
+aclocal
+autoheader
+autoconf
+if ! automake; then
+	automake --add-missing
+fi
+
