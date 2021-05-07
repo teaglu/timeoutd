@@ -16,10 +16,11 @@ SignedSender::SignedSender(
 	int timeout) :
 	UdpSender(addr, addrLen, frequency)
 {
-	memset(hmacKey, 0, 32);
+	memset(hmacKey, 0, KEEPALIVE_HMAC_SIZE);
 	int presharedKeyLen= strlen(presharedKey);
 	memcpy(hmacKey, presharedKey,
-		(presharedKeyLen > 32) ? 32 : presharedKeyLen);
+		(presharedKeyLen > KEEPALIVE_HMAC_SIZE) ?
+		KEEPALIVE_HMAC_SIZE : presharedKeyLen);
 
 	this->key= key;
 	this->timeout= timeout;

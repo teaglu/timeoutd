@@ -1,9 +1,6 @@
 class Scheduler;
 typedef std::shared_ptr<Scheduler> SchedulerRef;
 
-#define KEY_LENGTH 32
-#define HMAC_LENGTH 32
-
 class SignedListener;
 
 /**
@@ -18,7 +15,7 @@ public:
 	PreSharedKey(char const *);
 
 protected:
-	char key[KEY_LENGTH];
+	char key[32];
 
 	friend class SignedListener;
 };

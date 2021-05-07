@@ -77,17 +77,21 @@ bool SignedListener::validateHeader(
 			PreSharedKeyRef k= *keyI;
 
 			// Use 36 bytes so we include the timestamp
-			if (!HMAC_Init(hmacCtx, k->key, KEY_LENGTH, EVP_sha256())) {
+			if (!HMAC_Init(hmacCtx,
+				k->key, KEEPALIVE_HMAC_SIZE, EVP_sha256()))
+			{
 				Log::log(LOG_ERROR, "Failed to init HMAC");
 			} else if (!HMAC_Update(hmacCtx, data + 36, dataLen - 36)) {
 				Log::log(LOG_ERROR, "Failed to add data to HMAC");
 			} else {
-				unsigned char testHmac[HMAC_LENGTH];
-				unsigned int testHmacLen= HMAC_LENGTH;
+				unsigned char testHmac[KEEPALIVE_HMAC_SIZE];
+				unsigned int testHmacLen= KEEPALIVE_HMAC_SIZE;
 				if (!HMAC_Final(hmacCtx, testHmac, &testHmacLen)) {
 					Log::log(LOG_ERROR, "Failed to finalize HMAC");
 				} else {
-					if (memcmp(testHmac, hdr->hmac, HMAC_LENGTH) == 0) {
+					if (memcmp(testHmac,
+						hdr->hmac, KEEPALIVE_HMAC_SIZE) == 0)
+					{
 						valid= true;
 					}
 				}
@@ -157,7 +161,9 @@ void SignedListener::handlePayload(
 
 PreSharedKey::PreSharedKey(char const *value)
 {
-	memset(key, 0, KEY_LENGTH);
-	strncpy(key, value, KEY_LENGTH);
+	memset(key, 0, KEEPALIVE_HMAC_SIZE);
+	int valueLen= strlen(value);
+	memcpy(key, value,
+		(valueLen > KEEPALIVE_HMAC_SIZE) ? KEEPALIVE_HMAC_SIZE : valueLen);
 }
 
