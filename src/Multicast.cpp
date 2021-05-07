@@ -29,13 +29,13 @@ void Multicast::setupSender(int sock)
 			strerror(errno));
 	}
 
-    if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
-        &ip4Address, sizeof(ip4Address)) == -1)
-    {
-        Log::log(LOG_ERROR,
-            "Unable to bind multicast to interface %s: %s",
-            ip4Interface.c_str(), strerror(errno));
-    }
+	if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
+		&ip4Address, sizeof(ip4Address)) == -1)
+	{
+		Log::log(LOG_ERROR,
+			"Unable to bind multicast to interface %s: %s",
+			ip4Interface.c_str(), strerror(errno));
+	}
 }
 
 void Multicast::setupReceiver(int sock)

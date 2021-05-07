@@ -64,11 +64,11 @@ static void addSender(
 }
 
 static void addSenderFile(
-    std::list<std::string>& preSharedKeys,
-    int senderFrequency,
-    char const *senderKey,
-    int senderTimeout,
-    std::list<SenderRef>& senders,
+	std::list<std::string>& preSharedKeys,
+	int senderFrequency,
+	char const *senderKey,
+	int senderTimeout,
+	std::list<SenderRef>& senders,
 	char const *path)
 {
 	Log::log(LOG_DEBUG,
@@ -93,8 +93,8 @@ static void addSenderFile(
 			*comment= '\0';
 		}
 
-        for (char *c= &line[strlen(line) - 1];
-            (c >= line) && (*c <= ' '); c--) *c= '\0';
+		for (char *c= &line[strlen(line) - 1];
+			(c >= line) && (*c <= ' '); c--) *c= '\0';
 
 		if (line[0] != '\0') {
 			addSender(
