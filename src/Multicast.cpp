@@ -3,9 +3,15 @@
 #include "Multicast.h"
 #include "Log.h"
 
+#define IFF_802_1Q_VLAN 1<<0
+#define IFF_EBRIDGE 1<<1
+#define IFF_ISATAP 1<<3
+
 struct in_addr Multicast::ip4Group;
-std::string Multicast::ip4Interface;
-struct in_addr Multicast::ip4Address= { INADDR_ANY };
+
+MulticastInterfaceRef Multicast::sendInterface;
+std::list<MulticastInterfaceRef> Multicast::receiveInterfaces;
+
 
 // The default multicast TTL is 1 meaning don't pass outside the broadcast
 // domain, even if someone has PIM set up.  The default is currently set to
@@ -30,11 +36,11 @@ void Multicast::setupSender(int sock)
 	}
 
 	if (setsockopt(sock, IPPROTO_IP, IP_MULTICAST_IF,
-		&ip4Address, sizeof(ip4Address)) == -1)
+		sendInterface->getAddress(), sizeof(struct in_addr)) == -1)
 	{
 		Log::log(LOG_ERROR,
 			"Unable to bind multicast to interface %s: %s",
-			ip4Interface.c_str(), strerror(errno));
+			sendInterface->getName(), strerror(errno));
 	}
 }
 
@@ -43,17 +49,21 @@ void Multicast::setupReceiver(int sock)
 	struct ip_mreq group;
 
 	group.imr_multiaddr.s_addr= ip4Group.s_addr;
-	group.imr_interface.s_addr= ip4Address.s_addr;
-	if (setsockopt(sock, IPPROTO_IP,
-		IP_ADD_MEMBERSHIP, (char *)&group, sizeof(group)) < 0)
-	{
-		Log::log(LOG_ERROR,
-			"Failed to enable multicast group: %s",
-			strerror(errno));
-	} else {
-		Log::log(LOG_DEBUG,
-			"Subscribed to multicast group %s",
-			MCAST_ADDRESS);
+
+	for (MulticastInterfaceRef interface : receiveInterfaces) {
+		group.imr_interface.s_addr= interface->getAddress()->s_addr;
+
+		if (setsockopt(sock, IPPROTO_IP,
+			IP_ADD_MEMBERSHIP, (char *)&group, sizeof(group)) < 0)
+		{
+			Log::log(LOG_ERROR,
+				"Failed to enable multicast group: %s",
+				strerror(errno));
+		} else {
+			Log::log(LOG_DEBUG,
+				"Subscribed to %s on %s",
+				MCAST_ADDRESS, interface->getName());
+		}
 	}
 }
 
@@ -71,14 +81,44 @@ void Multicast::setupReceiver(int sock)
 // but if people are running a routing engine they may publish /32's
 // in OSPF or something.  So ignore lo* to avoid picking that one.
 //
-// So far multicast in docker doesn't really work, but we might want to
-// run multicast on the hosts, so throw out the docker* interfaces that
-// have RFC1918 address but don't really go anywhere.
+// Multicast in docker appears to work now, you just have to run pimd on
+// the host if you want it to pass around like expected.  So we do want
+// to receive on docker0 and docker_gwbridge.
+//
+// We don't pick that as the sending interface, because presumably either:
+//
+// a) we're running timeoutd on the hosts not in containers, so we want
+//    to send to our peers on the actual interface
+//
+// b) we're running in the container, and our one bridge is going to be
+//    the other side of a veth running in docker0 or docker_gwbridge.
+//
+// Since this is meant to be a failsafe you probably want it pretty close
+// to the bottom of your stack instead of inside docker.
+//
 
-char const *Multicast::ignoreInterfacePrefix[]= {
-	"lo",
-	"docker",
-	NULL
+struct interfaceRule {
+	char const *prefix;
+	bool receive;
+	bool send;
+};
+
+static struct interfaceRule interfaceRules[]= {
+	{ "lo", 							false,		false },
+
+	// Docker stuff is where it gets convoluted.  We want to listen on
+	// the bridge itself to get multicast from the containers.
+	{ "docker_gwbridge",				true,		false },
+	{ "docker0",						true,		false },
+
+	// These are the host sides of docker bridges
+	{ "veth",							false,		false },
+
+	// pimd psuedo-interface
+	{ "pimreg",							false,		false },
+
+	// fin
+	{ NULL }
 };
 
 bool Multicast::scanInterfaces(int sock, struct ifconf &conf)
@@ -89,65 +129,141 @@ bool Multicast::scanInterfaces(int sock, struct ifconf &conf)
 	for (int i= 0; i < interfaceCnt; i++) {
 		struct ifreq *e= &conf.ifc_ifcu.ifcu_req[i];
 
-		if (ioctl(sock, SIOCGIFADDR, e) == -1) {
+		if (e->ifr_addr.sa_family != AF_INET) {
+			Log::log(LOG_DEBUG, "SKIP");
+			continue;
+		}
+
+		// Things we need
+		struct in_addr ifAddress;
+		short ifFlags= 0;
+		short ifPrivateFlags= 0;
+
+		if (ioctl(sock, SIOCGIFFLAGS, e) == -1) {
 			Log::log(LOG_CRITICAL,
-				"Error: SIOCGIFADDR read data failed: %s",
+				"SIOCGIFFLAGS failed: %s",
 				strerror(errno));
 
 			success= false;
 		} else {
+			ifFlags= e->ifr_flags;
+		}
+
+		// FIXME Eventually I'd like to disregard interfaces based on
+		// class flags or similar instead of going by a prefix list.
+		// For now this just functions to see what's what in debug mode.
+		//
+		// Also older kernels don't implements SIOCGIFPFLAGS.
+
+		if (ioctl(sock, SIOCGIFPFLAGS, e) == -1) {
+			if (errno == EINVAL) {
+				static bool alreadyWarned= false;
+
+				if (!alreadyWarned) {
+					Log::log(LOG_ERROR,
+						"SIOCGIFPFLAGS->EINVAL - your kernel is too old",
+						strerror(errno));
+					alreadyWarned= true;
+				}
+			} else {
+				Log::log(LOG_ERROR,
+					"Error retrieving private interface flags for %s: %s",
+					e->ifr_name, strerror(errno));
+
+				success= false;
+			}
+		} else {
+			ifPrivateFlags= e->ifr_flags;
+		}
+
+		Log::log(LOG_DEBUG,
+			"Multicast Flags: %s "
+			"%cMULTICAST "
+			"%c802_1Q_VLAN "
+			"%cEBRIDGE "
+			"%cISATAP",
+			e->ifr_name,
+			(ifFlags & IFF_MULTICAST) ? '+' : '-',
+			(ifPrivateFlags & IFF_802_1Q_VLAN) ? '+' : '-',
+			(ifPrivateFlags & IFF_EBRIDGE) ? '+' : '-',
+			(ifPrivateFlags & IFF_ISATAP) ? '+' : '-');
+
+		if (ioctl(sock, SIOCGIFADDR, e) == -1) {
+			Log::log(LOG_CRITICAL,
+				"SIOCGIFADDR failed: %s",
+				strerror(errno));
+
+			success= false;
+		} else {
+			ifAddress=
+				((struct sockaddr_in *)&e->ifr_ifru.ifru_addr)->sin_addr;
+		}
+
+		if (success) {
 			unsigned long addr= ntohl(
 				((struct sockaddr_in *)&e->
 				ifr_ifru.ifru_addr)->sin_addr.s_addr);
-			unsigned long mask= ntohl(
-				((struct sockaddr_in *)&e->
-				ifr_ifru.ifru_netmask)->sin_addr.s_addr);
-
-			addr= addr & mask;
 
 			size_t ifNameLen= strlen(e->ifr_name);
 
-			bool use= true;
-			for (char const **ti= ignoreInterfacePrefix;
-				*ti != NULL; ti++)
+			bool useReceive= true;
+			bool useSend= true;
+			for (const struct interfaceRule *rule= interfaceRules;
+				rule->prefix != NULL; rule++)
 			{
-				size_t testNameLen= strlen(*ti);
-				if (ifNameLen >= testNameLen) {
-					if (strncmp(e->ifr_name, *ti, testNameLen) == 0) {
-						use= false;
+				size_t testLen= strlen(rule->prefix);
+				if (ifNameLen >= testLen) {
+					if (strncmp(e->ifr_name, rule->prefix, testLen) == 0) {
+						if (!rule->send) useSend= false;
+						if (!rule->receive) useReceive= false;
+
+						// For now matches are terminating
+						break;
 					}
 				}
 			}
 
-			if (use) {
-				use= false;
-				if ((addr & 0xFF000000) == 0x0A000000) {
-					// 10.0.0.0 - 10.255.255.255
-					use= true;
-				} else if ((addr & 0xFFFF0000) == 0xC0A80000) {
-					// 192.168.0.0 - 192.168.255.255
-					use= true;
-				} else if ((addr & 0xFFF00000) == 0xAC100000) {
-					// 172.16.0.0 - 172.31.255.255
-					use= true;
-				}
+			// Determine if the interface IP4 address is in an RFC1918
+			// private IP range.
+
+			bool is1918= false;
+			if ((addr & 0xFF000000) == 0x0A000000) {
+				// 10.0.0.0 - 10.255.255.255
+				is1918= true;	
+			} else if ((addr & 0xFFFF0000) == 0xC0A80000) {
+				// 192.168.0.0 - 192.168.255.255
+				is1918= true;
+			} else if ((addr & 0xFFF00000) == 0xAC100000) {
+				// 172.16.0.0 - 172.31.255.255
+				is1918= true;
 			}
 
-			Log::log(LOG_DEBUG,
-				"Interface %s %s a multicast candidate",
-				e->ifr_name, use ? "IS" : "is not");
+			useSend= useSend && is1918;
 
-			if (use) {
-				if (!ip4Interface.empty()) {
+			Log::log(LOG_DEBUG,
+				"Multicast: %s %s %s",
+				e->ifr_name,
+				useSend ? "+SEND" : "-send",
+				useReceive ? "+RECEIVE" : "-receive");
+
+			struct in_addr interfaceAddr=
+				((struct sockaddr_in *)&e->ifr_ifru.ifru_addr)->sin_addr;
+
+			if (useReceive) {
+				receiveInterfaces.push_back(
+					std::make_shared<MulticastInterface>(
+					e->ifr_name, interfaceAddr));
+
+			}
+
+			if (useSend) {
+				if (sendInterface) {
 					Log::log(LOG_WARNING,
 						"Multiple multicast-eligible interfaces");
-
-					success= false;
 				} else {
-					ip4Interface= e->ifr_name;
-					ip4Address.s_addr=
-						((struct sockaddr_in *)&e->
-						ifr_ifru.ifru_addr)->sin_addr.s_addr;
+					sendInterface=
+						std::make_shared<MulticastInterface>(
+						e->ifr_name, interfaceAddr);
 				}
 			}
 		}
@@ -203,17 +319,27 @@ bool Multicast::init(int ip4Ttl)
 		close(sock);
 	}
 
-	if (ip4Interface.empty()) {
+	if (!sendInterface) {
 		Log::log(LOG_WARNING,
 			"Unable to find an RFC1918 interface to bind multicast");
 
 		success= false;
-	} else {
-		Log::log(LOG_DEBUG,
-			"Selected interface %s for multicast operations",
-			ip4Interface.c_str());
 	}
 
 	return success;
 }
+
+MulticastInterface::MulticastInterface(
+	char const *name,
+	struct in_addr &address)
+{
+	this->name= name;
+	this->address= address;
+}
+
+
+MulticastInterface::~MulticastInterface()
+{
+}
+
 

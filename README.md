@@ -43,19 +43,33 @@ between broadcast domains via PIM.  This value can be overridden with the
 
 ## Multi-Home Hosts
 
-Multicast on multi-homed hosts requires timeoutd to bind to a particular
-interface for both sending and receiving.
+Multicast on multi-homed hosts requires timeoutd to explicitly bind
+to interfaces.  If the host is not multi-homed in the conventional sense,
+the host can still function as multi-homed if docker is used, because the
+host sees both the external interface and the docker_gwbridge interface.
 
-To find the correct interface, timeoutd examines each network interface
-looking for one with a valid RFC1918 IP4 address.  In the common case of
-cloud hosts with a direct internet interface and an internal interface,
-this will locate the correct interface.
+Timeoutd examines each network interface, and discards any interface which
+does not have a valid RFC1918 IP4 address.
 
-Sites which use publically routed addresses on private networks will have
-problems with this strategy, as will sites with hosts that have more than
-one interface with an RFC1918 address.
+In the common case of cloud hosts with a direct internet interface and
+one or more internal interfaces, this will prevent attempting to send
+multicast traffic to the public internet.
 
-Interfaces whose name starts with "lo" or "docker" are excluded.
+(If you use routable address ranges internally that logic is not correct.)
+
+Interfaces starting with "lo", "veth", or "pimreg" are excluded.
+
+Interfaces starting with "docker_gwbridge" and "docker0" are excluded from
+being used as a sending interface, but are still used to listen for
+multicast traffic.
+
+All remaining interfaces will be configured to listen for multicast using
+the IP_ADD_MEMBERSHIP socket option.  The first interface encountered will
+be used for sending multicast.
+
+(If you run timeoutd on the host, this will allow mutual monitoring between
+peers on other hosts.  In this case you should run pimd on the host to
+forward multicast from the containers to the physical network.)
 
 ## Notification
 
@@ -64,7 +78,7 @@ which is commonly a shell script.  The first argument is the key
 that went offline, and the second argument is the IP address the
 key was last received from.
 
-By default the shell is located in /usr/local/libexec/timeoutd-notify.
+By default the script is located in /usr/local/libexec/timeoutd-notify.
 This can be overridden with the -s flag.
 
 Example scripts are included in the "sample" directory.  If you include
@@ -83,8 +97,10 @@ a pre-shared key for an HMAC digest on the message packets.  The program
 will then listen on port 2953 for secured packets.
 
 The secured format is the same as the simple format, except it has a header
-with a timestamp (to prevent replay) and a message digest.  The full form
-of the header is in the file protocol.h.
+with a timestamp (to prevent replay) and a HMAC digest implementing a
+simple pre-shared key protocol.
+
+The full format of the header is in the file protocol.h.
 
 If the secured protocol is enabled, the program will still listen on port
 2952 for simple packets.
